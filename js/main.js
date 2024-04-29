@@ -99,8 +99,84 @@ function createCharts() {
 //                document.getElementById("tablePages").style.display = "block";
             });
         });
+
     } else if (lastfmMetric == "album") {
-        console.log("to be done later")
+        document.getElementById("loadingMessages").innerHTML = "Gathering albums...";
+        var albumsList = [];
+        var promiseAlbum = new Promise(function(resolve, reject) {
+            var restAPIcall = "https://ws.audioscrobbler.com/2.0/?method=user.gettopalbums&user=" + lastfmUsername + "&period=" + lastfmTimeframe + "&limit=" + lastfmReturnLimit + "&api_key=bc139a6bdeaa921ed70e49ca9a21f683&format=json";
+            var request = new XMLHttpRequest();
+            request.onreadystatechange = function() {
+                if (request.readyState === 4) {
+                    if (request.status === 200) {
+                        // do nothing
+                    } else {
+                        console.log("Last.fm returned " + request.status + " error. Page " + currentPage + " was lost. Trying again for more accurate results.");
+                        if (request.status === 500) {
+                            alert("Last.fm returned an Internal Server Error. Please retry.");
+                            return;
+                        }
+                    }
+                }
+            };
+            request.open('GET', restAPIcall, true);
+            request.onload = function() {
+                var data = JSON.parse(this.response);
+                try {
+                    for (var i = 0; i < data.topalbums.album.length; i++) {
+                        albumsList.push({
+                            artistName: data.topalbums.album[i].artist.name,
+                            albumName: data.topalbums.album[i].name
+                        });
+                        durationDict.push({
+                            artistName: data.topalbums.album[i].artist.name,
+                            albumName: data.topalbums.album[i].name,
+                            duration: 0,
+                            durHours: null,
+                            durMinutes: null,
+                            durSeconds: null,
+                            playcount: 0,
+                            playtimeRank: null,
+                            playcountRank: i + 1,
+                            emptyTracks: 0
+                        });
+                        if (durationDict.length == data.topalbums.album.length) {
+                            resolve();
+                        }
+                    }
+                } catch (err) {
+                    console.log(err);
+                    alert("Username not found.");
+                    document.getElementById("loadingMessages").innerHTML = "";
+                    return;
+                }
+            };
+            request.send();
+        });
+
+        promiseAlbum.then(function() {
+            document.getElementById("loadingMessages").innerHTML = "Collecting Tracks...";
+            gatherAlbumTracks(albumsList).then(function() {
+                document.getElementById("loadingMessages").innerHTML = "";
+                chartOutput.innerHTML = "";
+                durationDict.sort(function(a, b) {
+                    return b.duration - a.duration;
+                });
+                for (var z = 0; z < durationDict.length; z++) {
+                    durationDict[z].playtimeRank = z + 1;
+                }
+                durationDict.forEach(function(entry) {
+                    entry.durHours = Math.floor(entry.duration / 3600);
+                    entry.durMinutes = Math.floor((entry.duration - entry.durHours * 3600) / 60);
+                    entry.durSeconds = entry.duration - entry.durHours * 3600 - entry.durMinutes * 60;
+                });
+                createAlbumTable(durationDict);
+                tracksWithNoTime.sort();
+                document.getElementById("popUpBox").innerHTML = "There are " + tracksWithNoTime.length + " track(s) with no time data.<br>" + tracksWithNoTime.join("<br>") + "<br>";
+                document.getElementById("badDataButton").style.display = "block";
+            });
+        });
+
     } else if (lastfmMetric == "track") {
         document.getElementById("loadingMessages").innerHTML = "Collecting Tracks..."
         gatherTracks(null).then(function () {
@@ -167,6 +243,21 @@ function gatherTracks(listofNamesTemp) {
             });
         }
         requestTwo.send();
+    });
+}
+
+
+function gatherAlbumTracks(listofAlbums) {
+    return new Promise(function(resolve) {
+        var promises = listofAlbums.map(function(album) {
+            return gatherTracksPerAlbum(album);
+        });
+        var total = promises.length;
+        promiseProgress(promises, function(completed) {
+            document.getElementById("loadingMessages").innerHTML = "Calculating Album durations... Completed albums " + completed + " of " + total;
+        }).then(function() {
+            resolve();
+        });
     });
 }
 
@@ -237,6 +328,72 @@ function gatherTracksPerPage(listofNames, currentPage) {
     });
 }
 
+
+function gatherTracksPerAlbum(album) {
+    return new Promise(function(resolve) {
+        var restAPIcallAlbum = "https://ws.audioscrobbler.com/2.0/?method=user.gettopalbums&user=" + lastfmUsername + "&api_key=bc139a6bdeaa921ed70e49ca9a21f683&period=" + lastfmTimeframe + "&format=json";
+        var requestAlbum = new XMLHttpRequest();
+        requestAlbum.onreadystatechange = function() {
+            if (requestAlbum.readyState === 4) {
+                if (requestAlbum.status === 200) {
+                    var data = JSON.parse(requestAlbum.response);
+                    var albumData = data.topalbums.album.find(function(a) {
+                        return a.name === album.albumName && a.artist.name === album.artistName;
+                    });
+                    if (albumData) {
+                        var playcount = albumData.playcount;
+                        var restAPIcallTracks = "https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=bc139a6bdeaa921ed70e49ca9a21f683&artist=" + encodeURIComponent(album.artistName) + "&album=" + encodeURIComponent(album.albumName) + "&format=json";
+                        var requestTracks = new XMLHttpRequest();
+                        requestTracks.onreadystatechange = function() {
+                            if (requestTracks.readyState === 4) {
+                                if (requestTracks.status === 200) {
+                                    var tracksData = JSON.parse(requestTracks.response);
+                                    var totalDuration = 0;
+                                    if (tracksData.album && tracksData.album.tracks && tracksData.album.tracks.track) {
+                                        for (var j = 0; j < tracksData.album.tracks.track.length; j++) {
+                                            var trackDuration = tracksData.album.tracks.track[j].duration;
+                                            if (trackDuration && trackDuration > 0) {
+                                                totalDuration += trackDuration;
+                                            } else {
+                                                tracksWithNoTime.push(album.artistName + " --- " + album.albumName + " --- " + tracksData.album.tracks.track[j].name);
+                                            }
+                                        }
+                                    }
+                                    for (var d = 0; d < durationDict.length; d++) {
+                                        if (durationDict[d].artistName === album.artistName && durationDict[d].albumName === album.albumName) {
+                                            durationDict[d].duration = totalDuration * playcount;
+                                            durationDict[d].playcount = playcount;
+                                            break;
+                                        }
+                                    }
+                                    resolve();
+                                } else {
+                                    console.log("Last.fm returned " + requestTracks.status + " error. Album tracks for " + album.albumName + " were not retrieved.");
+                                    tracksWithNoTime.push(album.artistName + " --- " + album.albumName + " --- N/A");
+                                    resolve();
+                                }
+                            }
+                        };
+                        requestTracks.open('GET', restAPIcallTracks, true);
+                        requestTracks.send();
+                    } else {
+                        console.log("Album not found in user's top albums: " + album.albumName);
+                        tracksWithNoTime.push(album.artistName + " --- " + album.albumName + " --- N/A");
+                        resolve();
+                    }
+                } else {
+                    console.log("Last.fm returned " + requestAlbum.status + " error. Album " + album.albumName + " was lost. Skipping this album.");
+                    tracksWithNoTime.push(album.artistName + " --- " + album.albumName + " --- N/A");
+                    resolve();
+                }
+            }
+        };
+        requestAlbum.open('GET', restAPIcallAlbum, true);
+        requestAlbum.send();
+    });
+}
+
+
 function promiseProgress(proms, progress) {
     var d = 0;
     progress(0);
@@ -246,7 +403,7 @@ function promiseProgress(proms, progress) {
             progress(d);
         });
     }
-    return Promise.all(proms)
+    return Promise.all(proms);
 }
 
 function createArtistTable(dataDictionary) {
@@ -308,6 +465,65 @@ function createArtistTable(dataDictionary) {
         trHead.appendChild(th);
     }
     
+    document.getElementById("chartOutput").appendChild(table);
+    adjustTable();
+}
+
+
+function createAlbumTable(dataDictionary) {
+    document.getElementById("chartOutput").innerHTML = "";
+    var table = document.createElement('table');
+    table.setAttribute('id', 'tableOfOutput');
+    table.setAttribute('class', 'display');
+    table.setAttribute('style', 'width:100%');
+    var tableHeader = ["Time Rank", "Album", "Artist", "Playtime", "Playcount", "Plays Rank", "Rank Change"];
+
+    var tr;
+    for (var c = 0; c < dataDictionary.length; c++) {
+        tr = table.insertRow();
+
+        var tdTimeRank = document.createElement('td');
+        tdTimeRank = tr.insertCell();
+        tdTimeRank.innerHTML = dataDictionary[c].playtimeRank;
+
+        var tdAlbum = document.createElement('td');
+        tdAlbum = tr.insertCell();
+        tdAlbum.innerHTML = dataDictionary[c].albumName;
+
+        var tdArtist = document.createElement('td');
+        tdArtist = tr.insertCell();
+        tdArtist.innerHTML = dataDictionary[c].artistName;
+
+        var tdPlaytime = document.createElement('td');
+        tdPlaytime = tr.insertCell();
+        tdPlaytime.innerHTML = dataDictionary[c].durHours + ":" + dataDictionary[c].durMinutes.toLocaleString('en-US', {minimumIntegerDigits: 2, useGrouping:false}) + ":" + dataDictionary[c].durSeconds.toLocaleString('en-US', {minimumIntegerDigits: 2, useGrouping:false});
+
+        var tdPlaycount = document.createElement('td');
+        tdPlaycount = tr.insertCell();
+        tdPlaycount.innerHTML = dataDictionary[c].playcount;
+
+        var tdPlayRank = document.createElement('td');
+        tdPlayRank = tr.insertCell();
+        tdPlayRank.innerHTML = dataDictionary[c].playcountRank;
+
+        var rankChange = Number(dataDictionary[c].playcountRank - dataDictionary[c].playtimeRank);
+        var tdRankChange = document.createElement('td');
+        tdRankChange = tr.insertCell();
+        if (rankChange > 0) {
+            tdRankChange.innerHTML = "+" + String(rankChange);
+        } else {
+            tdRankChange.innerHTML = String(rankChange);
+        }
+    }
+
+    var header = table.createTHead();
+    var trHead = header.insertRow(0);
+    for (var h = 0; h < tableHeader.length; h++) {
+        var th = document.createElement('th');
+        th.innerHTML = tableHeader[h];
+        trHead.appendChild(th);
+    }
+
     document.getElementById("chartOutput").appendChild(table);
     adjustTable();
 }
